@@ -1,281 +1,224 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { GoogleGenerativeAI } from '@google/generative-ai';
 
-// Helper function to execute generateContent with automatic retry on 503 and fallback to other models
-// Helper function to execute generateContent with rotation through multiple Gemini API keys and OpenRouter fallback
-async function generateTextWithFallback(
-  apiKeys: string[],
-  payload: {
-    prompt: string;
-    mediaType: string;
-    base64Image: string;
-  },
-  primaryModel: string
+const MODELS = [
+  'google/gemini-2.0-flash-exp:free',
+  'google/gemini-2.5-flash-exp-0827:free',
+  'meta-llama/llama-4-maverick:free',
+  'microsoft/phi-4-multimodal-instruct:free',
+];
+
+const EXTRACTION_PROMPT = `You are an expert OCR system for Hindi/Devanagari text in Indian police duty charts.
+Extract all duty records from this image. Each record = one duty group (one main officer + their supporting staff assigned to one location).
+
+IMPORTANT RULES:
+1. Read ALL text carefully, including Hindi numerals.
+2. Extract EVERY officer/staff member, do not skip any.
+3. If duty type is not explicitly stated, infer from context (e.g. "बैरियर ड्यूटी", "गश्त ड्यूटी", "चेकिंग ड्यूटी").
+4. For dutyTime, extract exact timing; if not found use "प्रातः 08:00 बजे से रात्रि 20:00 बजे तक".
+5. Leave zonalMagistrate, zonalPoliceOfficer, sectorMagistrate, sectorPoliceOfficer as empty strings.
+
+Return ONLY valid JSON, no markdown backticks, no explanation:
+{
+  "eventName": "string (e.g. काँवड़ यात्रा-2025)",
+  "district": "string (e.g. बुलन्दशहर)",
+  "dutyDateFrom": "string (e.g. 11.07.2025)",
+  "dutyDateTo": "string (e.g. 24.07.2025)",
+  "records": [
+    {
+      "dutyType": "string",
+      "mainOfficerName": "string (full name with rank)",
+      "mainOfficerMobile": "string",
+      "supportingOfficers": [
+        { "name": "string", "mobile": "string" }
+      ],
+      "dutyPlace": "string",
+      "thanaArea": "string",
+      "dutyTime": "string",
+      "zonalMagistrate": "",
+      "zonalPoliceOfficer": "",
+      "sectorMagistrate": "",
+      "sectorPoliceOfficer": ""
+    }
+  ]
+}`;
+
+async function extractWithOpenRouter(
+  base64Data: string, 
+  mediaType: string, 
+  model: string
 ): Promise<string> {
-  const modelsToTry = [
-    primaryModel,
-    'gemini-2.5-flash',
-    'gemini-2.0-flash',
-    'gemini-flash-latest',
-    'gemini-pro-latest',
-    'gemini-3.5-flash',
-    'gemini-2.5-flash-lite'
-  ];
-  
-  const uniqueModels = Array.from(new Set(modelsToTry));
-  let lastError: any = null;
-  
-  // Try direct Gemini API keys and models first
-  for (const modelName of uniqueModels) {
-    for (const apiKey of apiKeys) {
-      console.log(`Attempting generation with model: ${modelName} using key: ${apiKey.substring(0, 10)}...`);
-      try {
-        const genAI = new GoogleGenerativeAI(apiKey);
-        const model = genAI.getGenerativeModel({ model: modelName });
-        const maxRetries = 3;
-        
-        for (let attempt = 1; attempt <= maxRetries; attempt++) {
-          try {
-            const result = await model.generateContent({
-              contents: [
-                {
-                  role: 'user',
-                  parts: [
-                    {
-                      inlineData: {
-                        mimeType: payload.mediaType,
-                        data: payload.base64Image
-                      }
-                    },
-                    {
-                      text: payload.prompt
-                    }
-                  ]
+  const apiKey = process.env.OPENROUTER_API_KEY;
+  if (!apiKey) {
+    throw new Error('OPENROUTER_API_KEY is not configured');
+  }
+
+  const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://duty-card-generator.vercel.app',
+      'X-Title': 'Police Duty Card Generator',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 4000,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:${mediaType};base64,${base64Data}` } },
+          { type: 'text', text: EXTRACTION_PROMPT }
+        ]
+      }]
+    })
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`OpenRouter ${model} failed: ${response.status} ${err}`);
+  }
+
+  const data = await response.json();
+  return data.choices?.[0]?.message?.content || '';
+}
+
+async function extractWithGeminiDirect(
+  base64Data: string,
+  mediaType: string
+): Promise<string> {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error('GEMINI_API_KEY not configured');
+  }
+  const response = await fetch(
+    `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                inlineData: {
+                  mimeType: mediaType,
+                  data: base64Data
                 }
-              ]
-            });
-            const text = result.response.text ? result.response.text() : '';
-            console.log(`Success with model ${modelName} using key ${apiKey.substring(0, 10)}... on attempt ${attempt}`);
-            return text;
-          } catch (err: any) {
-            lastError = err;
-            const errMsg = err.message || '';
-            const is503 = errMsg.includes('503') || errMsg.toLowerCase().includes('service unavailable');
-            const isRateLimit = errMsg.includes('429') || 
-                                errMsg.toLowerCase().includes('too many requests') || 
-                                errMsg.toLowerCase().includes('resource has been exhausted') ||
-                                errMsg.toLowerCase().includes('quota');
-            
-            console.warn(`Model ${modelName} using key ${apiKey.substring(0, 10)}... attempt ${attempt} failed: ${errMsg}`);
-            
-            if (isRateLimit) {
-              console.warn(`Rate limit or resource exhaustion detected for key. Moving to the next API key immediately.`);
-              break; // Skip to next key immediately
-            }
-            
-            if (is503 && attempt < maxRetries) {
-              const delay = attempt * 1500;
-              console.log(`Retrying ${modelName} in ${delay}ms...`);
-              await new Promise(resolve => setTimeout(resolve, delay));
-            } else {
-              break; // Move to next key if not retryable or max retries exceeded
-            }
+              },
+              {
+                text: EXTRACTION_PROMPT
+              }
+            ]
           }
-        }
-      } catch (err: any) {
-        lastError = err;
-        console.warn(`Failed to initialize or execute model ${modelName} with key ${apiKey.substring(0, 10)}...:`, err.message || err);
-      }
+        ]
+      })
     }
+  );
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Direct Gemini API failed: ${response.status} ${err}`);
   }
 
-  // OpenRouter Fallback
-  const openRouterKey = process.env.OPENROUTER_API_KEY;
-  const openRouterModel = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
-  
-  if (openRouterKey) {
-    console.log(`All Gemini keys failed. Falling back to OpenRouter using model: ${openRouterModel}`);
-    try {
-      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${openRouterKey}`,
-          'Content-Type': 'application/json',
-          'HTTP-Referer': 'https://github.com/Anshuldhanjwal/Duty-card-generator',
-          'X-Title': 'Police Duty Card Generator'
-        },
-        body: JSON.stringify({
-          model: openRouterModel,
-          messages: [
-            {
-              role: 'user',
-              content: [
-                {
-                  type: 'text',
-                  text: payload.prompt
-                },
-                {
-                  type: 'image_url',
-                  image_url: {
-                    url: `data:${payload.mediaType};base64,${payload.base64Image}`
-                  }
-                }
-              ]
-            }
-          ]
-        })
-      });
+  const data = await response.json();
+  return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+}
 
-      if (!response.ok) {
-        const errText = await response.text();
-        throw new Error(`OpenRouter API error: ${response.status} ${response.statusText} - ${errText}`);
-      }
-
-      const data = await response.json();
-      const textResult = data.choices?.[0]?.message?.content || '';
-      if (!textResult) {
-        throw new Error('OpenRouter response returned empty content');
-      }
-      console.log('Success with OpenRouter fallback!');
-      return textResult;
-    } catch (orErr: any) {
-      console.error('OpenRouter fallback failed:', orErr.message || orErr);
-      throw orErr;
-    }
+function parseJSON(text: string) {
+  // Strip markdown code fences if present
+  let cleaned = text.trim();
+  const markdownMatch = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (markdownMatch) {
+    cleaned = markdownMatch[1];
   }
-  
-  throw lastError || new Error('All Gemini models and fallback keys failed to generate content');
+  cleaned = cleaned.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+  return JSON.parse(cleaned);
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const geminiKeysEnv = process.env.GEMINI_API_KEYS || '';
-    const geminiKeySingle = process.env.GEMINI_API_KEY || '';
-    
-    let apiKeys = geminiKeysEnv
-      .split(',')
-      .map(k => k.trim())
-      .filter(Boolean);
-    
-    if (geminiKeySingle && !apiKeys.includes(geminiKeySingle)) {
-      apiKeys.unshift(geminiKeySingle);
-    }
-    
-    if (apiKeys.length === 0) {
-      return NextResponse.json(
-        { error: 'Gemini API key is not configured. Please add GEMINI_API_KEY or GEMINI_API_KEYS to your .env.local file.' },
-        { status: 500 }
-      );
-    }
-
     const formData = await req.formData();
-    const files = formData.getAll('files') as File[];
-
+    // Support both 'images' and 'files' to be compatible with frontend & requests
+    let files = formData.getAll('images') as File[];
     if (!files || files.length === 0) {
-      return NextResponse.json({ error: 'No files uploaded' }, { status: 400 });
+      files = formData.getAll('files') as File[];
+    }
+    
+    if (!files || files.length === 0) {
+      return NextResponse.json({ error: 'No images or files provided' }, { status: 400 });
     }
 
-    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     const allRecords: any[] = [];
-    let eventName = 'काँवड़ यात्रा-2025';
-    let district = 'बुलन्दशहर';
-    let dutyDateFrom = '11.07.2025';
-    let dutyDateTo = '24.07.2025';
+    let eventMeta = { eventName: '', district: '', dutyDateFrom: '', dutyDateTo: '' };
 
-    // Process each file with Gemini Vision model
     for (const file of files) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const base64Image = buffer.toString('base64');
+      const bytes = await file.arrayBuffer();
+      const base64Data = Buffer.from(bytes).toString('base64');
       const mediaType = file.type || 'image/jpeg';
 
-      const responseText = await generateTextWithFallback(
-        apiKeys,
-        {
-          prompt: `You extract Hindi police duty chart data from the provided image.
-Analyze the columns smartly:
-1. If a row/location contains multiple shifts (e.g. Day Shift / "सुबह 08.00 बजे से 20.00 बजे तक" and Night Shift / "रात्रि 20.00 बजे से 08.00 बजे तक"), extract them as separate, individual records.
-2. For each record:
-   - Identify the main duty officer (e.g. Sub-Inspector "उ0नि0" or Inspector "निरीक्षक" or "Reserve Officer") and their mobile number.
-   - Extract all supporting staff members (e.g. Head Constable "हे0का0", Constable "का0", Home Guard "हो0गा0", Female Constable "म0का0") and their respective mobile numbers.
-   - Extract the duty location/place (e.g. "मामन तिराहा", "डी.पी.एस तिराहा").
-   - Extract the Thana area (e.g. "कोतवाली देहात", "औरंगाबाद", "सिकन्दराबाद").
-   - Extract the duty type (e.g. "बैरियर ड्यूटी", "अस्थायी चौकी ड्यूटी", etc.).
-   - Extract the specific duty time/shift (e.g. "सुबह 08.00 बजे से रात्रि 20.00 बजे तक" or "रात्रि 20.00 बजे से सुबह 08.00 बजे तक").
+      let extracted: any = null;
+      let lastError: Error | null = null;
 
-Return ONLY a single valid JSON block without any markdown wrapping (no \`\`\`json) and no conversational text.
-
-JSON format:
-{
-  "eventName": "काँवड़ यात्रा-2025",
-  "district": "बुलन्दशहर",
-  "dutyDateFrom": "11.07.2025",
-  "dutyDateTo": "24.07.2025",
-  "records": [{
-    "dutyType": "बैरियर ड्यूटी",
-    "mainOfficerName": "उ0नि0 श्री विजेन्द्र सिंह थाना को0देहात",
-    "mainOfficerMobile": "7048980163",
-    "supportingOfficers": [
-      {"name": "हे0का0 1395 सुमित कुमार थाना को0देहात", "mobile": "8630641512"},
-      {"name": "हो0गा0 541 चित्रकुमार थाना को0देहात", "mobile": "8630641512"}
-    ],
-    "dutyPlace": "मामन तिराहा",
-    "thanaArea": "कोतवाली देहात",
-    "dutyTime": "सुबह 08:00 बजे से रात्रि 20:00 बजे तक",
-    "zonalMagistrate": "",
-    "zonalPoliceOfficer": "",
-    "sectorMagistrate": "",
-    "sectorPoliceOfficer": ""
-  }]
-}
-
-Extract every single record present in the image. Do not summarize or skip any rows.`,
-          mediaType,
-          base64Image
-        },
-        modelName
-      );
-      
-      // Clean response text to extract JSON block if wrapped in markdown
-      let jsonText = responseText.trim();
-      const markdownMatch = jsonText.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-      if (markdownMatch) {
-        jsonText = markdownMatch[1];
-      }
-
-      try {
-        const parsed = JSON.parse(jsonText);
-        if (parsed.eventName) eventName = parsed.eventName;
-        if (parsed.district) district = parsed.district;
-        if (parsed.dutyDateFrom) dutyDateFrom = parsed.dutyDateFrom;
-        if (parsed.dutyDateTo) dutyDateTo = parsed.dutyDateTo;
-
-        if (parsed.records && Array.isArray(parsed.records)) {
-          allRecords.push(...parsed.records);
+      // Try each model in order until one works
+      for (const model of MODELS) {
+        try {
+          console.log(`Trying model: ${model}`);
+          const text = await extractWithOpenRouter(base64Data, mediaType, model);
+          extracted = parseJSON(text);
+          console.log(`Success with model: ${model}`);
+          break;
+        } catch (err: any) {
+          console.error(`Model ${model} failed:`, err.message);
+          lastError = err;
+          // Small delay before trying next model
+          await new Promise(r => setTimeout(r, 500));
         }
-      } catch (parseError) {
-        console.error('Failed to parse JSON for file:', file.name, parseError);
-        console.log('Raw response was:', responseText);
       }
+
+      // Secondary fallback to direct Gemini API if OpenRouter failed
+      if (!extracted && process.env.GEMINI_API_KEY) {
+        try {
+          console.log('Trying secondary fallback: Direct Gemini API');
+          const text = await extractWithGeminiDirect(base64Data, mediaType);
+          extracted = parseJSON(text);
+          console.log('Success with secondary fallback: Direct Gemini API');
+        } catch (err: any) {
+          console.error('Direct Gemini fallback failed:', err.message);
+          lastError = err;
+        }
+      }
+
+      if (!extracted) {
+        return NextResponse.json(
+          { error: `All models failed. Last error: ${lastError?.message}` },
+          { status: 500 }
+        );
+      }
+
+      // Merge event metadata from first successful extraction
+      if (!eventMeta.eventName && extracted.eventName) {
+        eventMeta = {
+          eventName: extracted.eventName,
+          district: extracted.district,
+          dutyDateFrom: extracted.dutyDateFrom,
+          dutyDateTo: extracted.dutyDateTo,
+        };
+      }
+
+      // Add unique IDs to records
+      const records = (extracted.records || []).map((r: any, i: number) => ({
+        ...r,
+        id: `${Date.now()}-${i}-${Math.random().toString(36).substr(2, 9)}`,
+      }));
+      allRecords.push(...records);
     }
 
-    // Attach local UUIDs to each record for react key and local editing identification
-    const recordsWithIds = allRecords.map((rec: any, idx: number) => ({
-      ...rec,
-      id: `${Date.now()}-${idx}-${Math.random().toString(36).substr(2, 9)}`,
-    }));
+    return NextResponse.json({ ...eventMeta, records: allRecords });
 
-    return NextResponse.json({
-      eventName,
-      district,
-      dutyDateFrom,
-      dutyDateTo,
-      records: recordsWithIds,
-    });
   } catch (error: any) {
-    console.error('Error during vision extraction:', error);
-    return NextResponse.json(
-      { error: error.message || 'An error occurred during extraction.' },
-      { status: 500 }
-    );
+    console.error('Extraction error:', error);
+    return NextResponse.json({ error: error.message }, { status: 500 });
   }
 }
