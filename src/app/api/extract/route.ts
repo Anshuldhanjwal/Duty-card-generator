@@ -1,6 +1,60 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
+// Helper function to execute generateContent with automatic retry on 503 and fallback to other models
+async function generateContentWithRetryAndFallback(
+  genAI: GoogleGenerativeAI,
+  payload: any,
+  primaryModel: string
+) {
+  const modelsToTry = [
+    primaryModel,
+    'gemini-2.5-flash',
+    'gemini-2.0-flash',
+    'gemini-flash-latest',
+    'gemini-pro-latest',
+    'gemini-3.5-flash',
+    'gemini-2.5-flash-lite'
+  ];
+  
+  const uniqueModels = Array.from(new Set(modelsToTry));
+  let lastError: any = null;
+  
+  for (const modelName of uniqueModels) {
+    console.log(`Attempting generation with model: ${modelName}`);
+    try {
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const maxRetries = 3;
+      
+      for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+          const result = await model.generateContent(payload);
+          console.log(`Success with model ${modelName} on attempt ${attempt}`);
+          return result;
+        } catch (err: any) {
+          lastError = err;
+          const errMsg = err.message || '';
+          const is503 = errMsg.includes('503') || errMsg.toLowerCase().includes('service unavailable');
+          console.warn(`Model ${modelName} attempt ${attempt} failed: ${errMsg}`);
+          
+          if (is503 && attempt < maxRetries) {
+            const delay = attempt * 1500;
+            console.log(`Retrying ${modelName} in ${delay}ms...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          } else {
+            break; // Move to the next model if not a 503 or we ran out of retries
+          }
+        }
+      }
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`Failed to execute model ${modelName}:`, err.message || err);
+    }
+  }
+  
+  throw lastError || new Error('All Gemini models failed to generate content');
+}
+
 export async function POST(req: NextRequest) {
   try {
     const apiKey = process.env.GEMINI_API_KEY;
@@ -21,7 +75,6 @@ export async function POST(req: NextRequest) {
     // Initialize Gemini API client
     const genAI = new GoogleGenerativeAI(apiKey);
     const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
-    const model = genAI.getGenerativeModel({ model: modelName });
     const allRecords: any[] = [];
     let eventName = 'काँवड़ यात्रा-2025';
     let district = 'बुलन्दशहर';
@@ -34,19 +87,21 @@ export async function POST(req: NextRequest) {
       const base64Image = buffer.toString('base64');
       const mediaType = file.type || 'image/jpeg';
 
-      const response = await model.generateContent({
-        contents: [
-          {
-            role: 'user',
-            parts: [
-              {
-                inlineData: {
-                  mimeType: mediaType,
-                  data: base64Image
-                }
-              },
-              {
-                text: `You extract Hindi police duty chart data from the provided image.
+      const response = await generateContentWithRetryAndFallback(
+        genAI,
+        {
+          contents: [
+            {
+              role: 'user',
+              parts: [
+                {
+                  inlineData: {
+                    mimeType: mediaType,
+                    data: base64Image
+                  }
+                },
+                {
+                  text: `You extract Hindi police duty chart data from the provided image.
 Analyze the columns smartly:
 1. If a row/location contains multiple shifts (e.g. Day Shift / "सुबह 08.00 बजे से 20.00 बजे तक" and Night Shift / "रात्रि 20.00 बजे से 08.00 बजे तक"), extract them as separate, individual records.
 2. For each record:
@@ -84,11 +139,13 @@ JSON format:
 }
 
 Extract every single record present in the image. Do not summarize or skip any rows.`
-              }
-            ]
-          }
-        ]
-      });
+                }
+              ]
+            }
+          ]
+        },
+        modelName
+      );
 
       const responseText = response.response.text ? response.response.text() : '';
       
