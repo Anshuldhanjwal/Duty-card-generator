@@ -20,7 +20,7 @@ export async function POST(req: NextRequest) {
 
     // Initialize Gemini API client
     const genAI = new GoogleGenerativeAI(apiKey);
-    const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash-lite';
+    const modelName = process.env.GEMINI_MODEL || 'gemini-1.5-flash';
     const model = genAI.getGenerativeModel({ model: modelName });
     const allRecords: any[] = [];
     let eventName = 'काँवड़ यात्रा-2025';
