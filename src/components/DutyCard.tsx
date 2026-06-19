@@ -269,31 +269,26 @@ export const DutyCard: React.FC<DutyCardProps> = ({
           {/* Spacer row + Sector police officer VALUE */}
           {/* ============================================ */}
           <tr>
-            <td className="border-r border-black px-2 py-4">{'\u00A0'}</td>
-            <td className="border-r border-black px-2 py-4">{'\u00A0'}</td>
-            <td className="border-r border-black px-2 py-4">{'\u00A0'}</td>
-            <td className="border-l-2 border-black px-3 py-4 text-center align-middle text-[12px] font-semibold">
+            <td className="border-b border-r border-black px-2 py-4">{'\u00A0'}</td>
+            <td className="border-b border-r border-black px-2 py-4">{'\u00A0'}</td>
+            <td className="border-b border-r border-black px-2 py-4">{'\u00A0'}</td>
+            <td className="border-b border-l-2 border-black px-3 py-4 text-center align-middle text-[12px] font-semibold">
               {record.sectorPoliceOfficer || '\u00A0'}
             </td>
           </tr>
-
-          {/* ============================================ */}
-          {/* FOOTER ROW */}
-          {/* ============================================ */}
-          <tr>
-            <td colSpan={4} className="px-6 pt-4 pb-3 text-right align-bottom">
-              <span className="font-bold text-[14px] leading-snug">
-                वरिष्ठ पुलिस अधीक्षक,
-              </span>
-              <br />
-              <span className="font-bold text-[14px] leading-snug">
-                जनपद—बुलन्दशहर
-              </span>
-            </td>
-          </tr>
-
         </tbody>
       </table>
+
+      {/* FOOTER OUTSIDE TABLE TO PREVENT BORDER BLEEDING */}
+      <div className="px-6 pt-4 pb-3 text-right">
+        <span className="font-bold text-[14px] leading-snug">
+          वरिष्ठ पुलिस अधीक्षक,
+        </span>
+        <br />
+        <span className="font-bold text-[14px] leading-snug">
+          जनपद—बुलन्दशहर
+        </span>
+      </div>
     </div>
   );
 };

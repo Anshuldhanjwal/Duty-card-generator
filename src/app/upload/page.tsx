@@ -39,7 +39,7 @@ export default function UploadPage() {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
-  // Compress image to max 1024px and 80% JPEG quality before upload
+  // Compress image to max 800px and 80% JPEG quality before upload
   async function compressImage(file: File): Promise<File> {
     return new Promise((resolve) => {
       const canvas = document.createElement('canvas');
@@ -48,8 +48,8 @@ export default function UploadPage() {
       const url = URL.createObjectURL(file);
 
       img.onload = () => {
-        // Max dimension 1024px (keeps text readable, reduces tokens by 70%)
-        const MAX = 1024;
+        // Max dimension 800px (fast processing, keeps text fully readable)
+        const MAX = 800;
         let { width, height } = img;
         if (width > MAX || height > MAX) {
           if (width > height) { height = Math.round(height * MAX / width); width = MAX; }

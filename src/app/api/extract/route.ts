@@ -162,6 +162,7 @@ async function tryOpenRouter(base64: string, mime: string, model: string): Promi
     },
     body: JSON.stringify({
       model,
+      max_tokens: 4000,
       temperature: 0.1,
       response_format: { type: 'json_object' },
       messages: [{
