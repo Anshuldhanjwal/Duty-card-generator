@@ -2,11 +2,16 @@ import { NextRequest, NextResponse } from 'next/server';
 import { GoogleGenerativeAI } from '@google/generative-ai';
 
 // Helper function to execute generateContent with automatic retry on 503 and fallback to other models
-async function generateContentWithRetryAndFallback(
-  genAI: GoogleGenerativeAI,
-  payload: any,
+// Helper function to execute generateContent with rotation through multiple Gemini API keys and OpenRouter fallback
+async function generateTextWithFallback(
+  apiKeys: string[],
+  payload: {
+    prompt: string;
+    mediaType: string;
+    base64Image: string;
+  },
   primaryModel: string
-) {
+): Promise<string> {
   const modelsToTry = [
     primaryModel,
     'gemini-2.5-flash',
@@ -20,47 +25,145 @@ async function generateContentWithRetryAndFallback(
   const uniqueModels = Array.from(new Set(modelsToTry));
   let lastError: any = null;
   
+  // Try direct Gemini API keys and models first
   for (const modelName of uniqueModels) {
-    console.log(`Attempting generation with model: ${modelName}`);
-    try {
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const maxRetries = 3;
-      
-      for (let attempt = 1; attempt <= maxRetries; attempt++) {
-        try {
-          const result = await model.generateContent(payload);
-          console.log(`Success with model ${modelName} on attempt ${attempt}`);
-          return result;
-        } catch (err: any) {
-          lastError = err;
-          const errMsg = err.message || '';
-          const is503 = errMsg.includes('503') || errMsg.toLowerCase().includes('service unavailable');
-          console.warn(`Model ${modelName} attempt ${attempt} failed: ${errMsg}`);
-          
-          if (is503 && attempt < maxRetries) {
-            const delay = attempt * 1500;
-            console.log(`Retrying ${modelName} in ${delay}ms...`);
-            await new Promise(resolve => setTimeout(resolve, delay));
-          } else {
-            break; // Move to the next model if not a 503 or we ran out of retries
+    for (const apiKey of apiKeys) {
+      console.log(`Attempting generation with model: ${modelName} using key: ${apiKey.substring(0, 10)}...`);
+      try {
+        const genAI = new GoogleGenerativeAI(apiKey);
+        const model = genAI.getGenerativeModel({ model: modelName });
+        const maxRetries = 3;
+        
+        for (let attempt = 1; attempt <= maxRetries; attempt++) {
+          try {
+            const result = await model.generateContent({
+              contents: [
+                {
+                  role: 'user',
+                  parts: [
+                    {
+                      inlineData: {
+                        mimeType: payload.mediaType,
+                        data: payload.base64Image
+                      }
+                    },
+                    {
+                      text: payload.prompt
+                    }
+                  ]
+                }
+              ]
+            });
+            const text = result.response.text ? result.response.text() : '';
+            console.log(`Success with model ${modelName} using key ${apiKey.substring(0, 10)}... on attempt ${attempt}`);
+            return text;
+          } catch (err: any) {
+            lastError = err;
+            const errMsg = err.message || '';
+            const is503 = errMsg.includes('503') || errMsg.toLowerCase().includes('service unavailable');
+            const isRateLimit = errMsg.includes('429') || 
+                                errMsg.toLowerCase().includes('too many requests') || 
+                                errMsg.toLowerCase().includes('resource has been exhausted') ||
+                                errMsg.toLowerCase().includes('quota');
+            
+            console.warn(`Model ${modelName} using key ${apiKey.substring(0, 10)}... attempt ${attempt} failed: ${errMsg}`);
+            
+            if (isRateLimit) {
+              console.warn(`Rate limit or resource exhaustion detected for key. Moving to the next API key immediately.`);
+              break; // Skip to next key immediately
+            }
+            
+            if (is503 && attempt < maxRetries) {
+              const delay = attempt * 1500;
+              console.log(`Retrying ${modelName} in ${delay}ms...`);
+              await new Promise(resolve => setTimeout(resolve, delay));
+            } else {
+              break; // Move to next key if not retryable or max retries exceeded
+            }
           }
         }
+      } catch (err: any) {
+        lastError = err;
+        console.warn(`Failed to initialize or execute model ${modelName} with key ${apiKey.substring(0, 10)}...:`, err.message || err);
       }
-    } catch (err: any) {
-      lastError = err;
-      console.warn(`Failed to execute model ${modelName}:`, err.message || err);
+    }
+  }
+
+  // OpenRouter Fallback
+  const openRouterKey = process.env.OPENROUTER_API_KEY;
+  const openRouterModel = process.env.OPENROUTER_MODEL || 'google/gemini-2.5-flash';
+  
+  if (openRouterKey) {
+    console.log(`All Gemini keys failed. Falling back to OpenRouter using model: ${openRouterModel}`);
+    try {
+      const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${openRouterKey}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://github.com/Anshuldhanjwal/Duty-card-generator',
+          'X-Title': 'Police Duty Card Generator'
+        },
+        body: JSON.stringify({
+          model: openRouterModel,
+          messages: [
+            {
+              role: 'user',
+              content: [
+                {
+                  type: 'text',
+                  text: payload.prompt
+                },
+                {
+                  type: 'image_url',
+                  image_url: {
+                    url: `data:${payload.mediaType};base64,${payload.base64Image}`
+                  }
+                }
+              ]
+            }
+          ]
+        })
+      });
+
+      if (!response.ok) {
+        const errText = await response.text();
+        throw new Error(`OpenRouter API error: ${response.status} ${response.statusText} - ${errText}`);
+      }
+
+      const data = await response.json();
+      const textResult = data.choices?.[0]?.message?.content || '';
+      if (!textResult) {
+        throw new Error('OpenRouter response returned empty content');
+      }
+      console.log('Success with OpenRouter fallback!');
+      return textResult;
+    } catch (orErr: any) {
+      console.error('OpenRouter fallback failed:', orErr.message || orErr);
+      throw orErr;
     }
   }
   
-  throw lastError || new Error('All Gemini models failed to generate content');
+  throw lastError || new Error('All Gemini models and fallback keys failed to generate content');
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
-    if (!apiKey) {
+    const geminiKeysEnv = process.env.GEMINI_API_KEYS || '';
+    const geminiKeySingle = process.env.GEMINI_API_KEY || '';
+    
+    let apiKeys = geminiKeysEnv
+      .split(',')
+      .map(k => k.trim())
+      .filter(Boolean);
+    
+    if (geminiKeySingle && !apiKeys.includes(geminiKeySingle)) {
+      apiKeys.unshift(geminiKeySingle);
+    }
+    
+    if (apiKeys.length === 0) {
       return NextResponse.json(
-        { error: 'Gemini API key is not configured. Please add GEMINI_API_KEY to your .env.local file.' },
+        { error: 'Gemini API key is not configured. Please add GEMINI_API_KEY or GEMINI_API_KEYS to your .env.local file.' },
         { status: 500 }
       );
     }
@@ -72,8 +175,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No files uploaded' }, { status: 400 });
     }
 
-    // Initialize Gemini API client
-    const genAI = new GoogleGenerativeAI(apiKey);
     const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
     const allRecords: any[] = [];
     let eventName = 'काँवड़ यात्रा-2025';
@@ -87,21 +188,10 @@ export async function POST(req: NextRequest) {
       const base64Image = buffer.toString('base64');
       const mediaType = file.type || 'image/jpeg';
 
-      const response = await generateContentWithRetryAndFallback(
-        genAI,
+      const responseText = await generateTextWithFallback(
+        apiKeys,
         {
-          contents: [
-            {
-              role: 'user',
-              parts: [
-                {
-                  inlineData: {
-                    mimeType: mediaType,
-                    data: base64Image
-                  }
-                },
-                {
-                  text: `You extract Hindi police duty chart data from the provided image.
+          prompt: `You extract Hindi police duty chart data from the provided image.
 Analyze the columns smartly:
 1. If a row/location contains multiple shifts (e.g. Day Shift / "सुबह 08.00 बजे से 20.00 बजे तक" and Night Shift / "रात्रि 20.00 बजे से 08.00 बजे तक"), extract them as separate, individual records.
 2. For each record:
@@ -138,16 +228,12 @@ JSON format:
   }]
 }
 
-Extract every single record present in the image. Do not summarize or skip any rows.`
-                }
-              ]
-            }
-          ]
+Extract every single record present in the image. Do not summarize or skip any rows.`,
+          mediaType,
+          base64Image
         },
         modelName
       );
-
-      const responseText = response.response.text ? response.response.text() : '';
       
       // Clean response text to extract JSON block if wrapped in markdown
       let jsonText = responseText.trim();
