@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+:root {
+  --background: #0f172a;
+  --foreground: #f8fafc;
+}
+
+body {
+  background-color: var(--background);
+  color: var(--foreground);
+  font-family: 'Noto Sans Devanagari', sans-serif;
+  margin: 0;
+  padding: 0;
+}
+
+/* ===== PRINT STYLES ===== */
+@media print {
+  /* Set A5 landscape size and margins */
+  @page {
+    size: A5 landscape;
+    margin: 8mm;
+  }
+
+  /* Force print background color */
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+
+  /* Hide everything on screen during printing */
+  body, html {
+    background: #fff !important;
+    color: #000 !important;
+  }
+
+  /* Hide header controls, buttons, lists headers */
+  main {
+    padding: 0 !important;
+    background: white !important;
+  }
+
+  main > div:first-child,
+  .print\:hidden {
+    display: none !important;
+  }
+
+  /* Handle "Print All" mode */
+  body.printing-all .card-container-wrapper {
+    display: block !important;
+    border: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    page-break-after: always !important;
+    page-break-inside: avoid !important;
+  }
+
+  body.printing-all .card-container-wrapper:last-child {
+    page-break-after: auto !important;
+  }
+
+  body.printing-all .duty-card-wrapper {
+    display: block !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Handle "Print Single Card" mode */
+  body.printing-single .card-container-wrapper {
+    display: none !important;
+  }
+
+  body.printing-single .card-container-wrapper:has(.printing-now) {
+    display: block !important;
+    border: none !important;
+    background: transparent !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    page-break-after: avoid !important;
+    page-break-inside: avoid !important;
+  }
+
+  body.printing-single .duty-card-wrapper {
+    display: none !important;
+  }
+
+  body.printing-single .duty-card-wrapper.printing-now {
+    display: block !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  /* Ensure card itself is border-collapse and fits A5 perfectly */
+  .duty-card-container {
+    width: 100% !important;
+    max-width: 100% !important;
+    margin: 0 !important;
+    border: 2px solid #000 !important;
+    background: #fff !important;
+    box-shadow: none !important;
+    color: #000 !important;
+  }
+
+  .duty-card-container td {
+    border-color: #000 !important;
+  }
+
+  .duty-card-container td.sub-header-cell {
+    background-color: #f2f2f2 !important;
+  }
+}
+
