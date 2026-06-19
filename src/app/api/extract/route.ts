@@ -28,7 +28,59 @@ const OPENROUTER_MODELS = [
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Extraction prompt — strict, no explanation, JSON only
+// JSON Schema for Gemini Direct structured output
+// ─────────────────────────────────────────────────────────────────────────────
+const JSON_SCHEMA = {
+  type: "OBJECT",
+  properties: {
+    eventName: { type: "STRING" },
+    district: { type: "STRING" },
+    dutyDateFrom: { type: "STRING" },
+    dutyDateTo: { type: "STRING" },
+    records: {
+      type: "ARRAY",
+      items: {
+        type: "OBJECT",
+        properties: {
+          dutyType: { type: "STRING" },
+          mainOfficerName: { type: "STRING" },
+          mainOfficerMobile: { type: "STRING" },
+          supportingOfficers: {
+            type: "ARRAY",
+            items: {
+              type: "OBJECT",
+              properties: {
+                name: { type: "STRING" },
+                mobile: { type: "STRING" }
+              },
+              required: ["name", "mobile"]
+            }
+          },
+          dutyPlace: { type: "STRING" },
+          thanaArea: { type: "STRING" },
+          dutyTime: { type: "STRING" },
+          zonalMagistrate: { type: "STRING" },
+          zonalPoliceOfficer: { type: "STRING" },
+          sectorMagistrate: { type: "STRING" },
+          sectorPoliceOfficer: { type: "STRING" }
+        },
+        required: [
+          "dutyType", 
+          "mainOfficerName", 
+          "mainOfficerMobile", 
+          "supportingOfficers", 
+          "dutyPlace", 
+          "thanaArea", 
+          "dutyTime"
+        ]
+      }
+    }
+  },
+  required: ["eventName", "district", "dutyDateFrom", "dutyDateTo", "records"]
+};
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Extraction prompt — strict, JSON layout instruction
 // ─────────────────────────────────────────────────────────────────────────────
 const PROMPT = `You are an expert OCR system for Hindi/Devanagari text in Indian police duty charts.
 
@@ -41,32 +93,7 @@ RULES:
 - supportingOfficers: all staff listed under the main officer for that location
 - dutyType: extract or infer (बैरियर ड्यूटी / गश्त ड्यूटी / चेकिंग ड्यूटी / अस्थायी चौकी ड्यूटी)
 - dutyTime: extract exact text from image; if missing use "प्रातः 08:00 बजे से रात्रि 20:00 बजे तक"
-- Set all zonal/sector fields to empty string ""
-
-Return ONLY a raw valid JSON object. No markdown, no backticks, no extra text before or after:
-{
-  "eventName": "काँवड़ यात्रा-2025",
-  "district": "बुलन्दशहर",
-  "dutyDateFrom": "11.07.2025",
-  "dutyDateTo": "24.07.2025",
-  "records": [
-    {
-      "dutyType": "बैरियर ड्यूटी",
-      "mainOfficerName": "उ0नि0 श्री विजेन्द्र सिंह थाना को0देहात",
-      "mainOfficerMobile": "7048980163",
-      "supportingOfficers": [
-        { "name": "हे0का0 1395 सुमित कुमार थाना को0देहात", "mobile": "8630641512" }
-      ],
-      "dutyPlace": "मामन तिराहा",
-      "thanaArea": "कोतवाली देहात",
-      "dutyTime": "प्रातः 08:00 बजे से रात्रि 20:00 बजे तक",
-      "zonalMagistrate": "",
-      "zonalPoliceOfficer": "",
-      "sectorMagistrate": "",
-      "sectorPoliceOfficer": ""
-    }
-  ]
-}`;
+- Set all zonal/sector fields to empty string ""`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: call Google Gemini directly via REST (no SDK needed)
@@ -90,7 +117,8 @@ async function tryGemini(base64: string, mime: string, model: string): Promise<s
               ],
             }],
             generationConfig: {
-              maxOutputTokens: 3000,
+              responseMimeType: "application/json",
+              responseSchema: JSON_SCHEMA,
               temperature: 0.1,
             },
           }),
@@ -134,13 +162,13 @@ async function tryOpenRouter(base64: string, mime: string, model: string): Promi
     },
     body: JSON.stringify({
       model,
-      max_tokens: 3000,
       temperature: 0.1,
+      response_format: { type: 'json_object' },
       messages: [{
         role: 'user',
         content: [
           { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
-          { type: 'text', text: PROMPT },
+          { type: 'text', text: PROMPT + '\nReturn ONLY a raw valid JSON object matching the requested schema.' },
         ],
       }],
     }),
