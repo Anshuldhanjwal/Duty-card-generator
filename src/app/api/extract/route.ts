@@ -1,32 +1,54 @@
 import { NextRequest, NextResponse } from 'next/server';
 
-// ── Model configuration ────────────────────────────────────────────────────
-// These are the CORRECT free model IDs that actually work on OpenRouter.
-// OpenRouter :free models cost $0 credits.
+// ─────────────────────────────────────────────────────────────────────────────
+// API Keys — loaded from env vars. For Vercel: set these in Project → Settings
+// → Environment Variables. They are NOT committed to git (see .gitignore).
+// ─────────────────────────────────────────────────────────────────────────────
+function getOpenRouterKey(): string {
+  return process.env.OPENROUTER_API_KEY || '';
+}
+
+function getGeminiKeys(): string[] {
+  return (process.env.GEMINI_API_KEY || '')
+    .split(',')
+    .map(k => k.trim())
+    .filter(Boolean);
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Model priority list — all free on OpenRouter, all support vision/Hindi
+// ─────────────────────────────────────────────────────────────────────────────
 const OPENROUTER_MODELS = [
-  'google/gemini-2.0-flash-exp:free',              // Best: fast, vision, Hindi
-  'meta-llama/llama-3.2-11b-vision-instruct:free', // Fallback 1
-  'qwen/qwen2-vl-7b-instruct:free',               // Fallback 2
+  'google/gemini-2.0-flash-exp:free',
+  'meta-llama/llama-4-maverick:free',
+  'meta-llama/llama-4-scout:free',
+  'google/gemini-2.5-flash-preview:free',
+  'qwen/qwen2-vl-7b-instruct:free',
 ];
 
-// Gemini direct — gemini-2.0-flash has 1000 req/DAY free (not 20!)
-const GEMINI_MODELS = ['gemini-2.0-flash', 'gemini-1.5-flash'];
+const GEMINI_MODELS = [
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-8b',
+];
 
-// ── Extraction prompt ──────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Extraction prompt — strict, no explanation, JSON only
+// ─────────────────────────────────────────────────────────────────────────────
 const PROMPT = `You are an expert OCR system for Hindi/Devanagari text in Indian police duty charts.
 
 Extract all duty records from this image. Each record = one duty group (one main officer + their supporting staff assigned to one duty location).
 
 RULES:
 - Read ALL text carefully including Hindi numerals and ranks (उ0नि0, हे0का0, हो0गा0, म0का0 etc.)
-- Extract EVERY officer. Do not skip anyone.
-- mainOfficerName: the senior-most officer listed first (with rank)
-- supportingOfficers: everyone listed under "सहयोगी पुलिसकमियों के नाम"
-- dutyType: infer from context if not explicit (बैरियर ड्यूटी / गश्त ड्यूटी / चेकिंग ड्यूटी)
-- dutyTime: extract exact text; default "प्रातः 08:00 बजे से रात्रि 20:00 बजे तक" if missing
-- Leave all zonal/sector fields as empty strings ""
+- Extract EVERY officer listed. Do not skip anyone.
+- mainOfficerName: the senior-most officer listed first (with rank prefix)
+- supportingOfficers: all staff listed under the main officer for that location
+- dutyType: extract or infer (बैरियर ड्यूटी / गश्त ड्यूटी / चेकिंग ड्यूटी / अस्थायी चौकी ड्यूटी)
+- dutyTime: extract exact text from image; if missing use "प्रातः 08:00 बजे से रात्रि 20:00 बजे तक"
+- Set all zonal/sector fields to empty string ""
 
-Return ONLY raw JSON with no markdown, no backticks, no explanation:
+Return ONLY a raw valid JSON object. No markdown, no backticks, no extra text before or after:
 {
   "eventName": "काँवड़ यात्रा-2025",
   "district": "बुलन्दशहर",
@@ -38,11 +60,11 @@ Return ONLY raw JSON with no markdown, no backticks, no explanation:
       "mainOfficerName": "उ0नि0 श्री विजेन्द्र सिंह थाना को0देहात",
       "mainOfficerMobile": "7048980163",
       "supportingOfficers": [
-        {"name": "हे0का01395 सुमित कुमार थाना को0देहात", "mobile": "8630641512"}
+        { "name": "हे0का0 1395 सुमित कुमार थाना को0देहात", "mobile": "8630641512" }
       ],
       "dutyPlace": "मामन तिराहा",
       "thanaArea": "कोतवाली देहात",
-      "dutyTime": "प्रातः 08 बजे से रात्रि 20:00 बजे तक",
+      "dutyTime": "प्रातः 08:00 बजे से रात्रि 20:00 बजे तक",
       "zonalMagistrate": "",
       "zonalPoliceOfficer": "",
       "sectorMagistrate": "",
@@ -51,22 +73,25 @@ Return ONLY raw JSON with no markdown, no backticks, no explanation:
   ]
 }`;
 
-// ── Helper: call OpenRouter ────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: call OpenRouter (OpenAI-compatible vision API)
+// ─────────────────────────────────────────────────────────────────────────────
 async function tryOpenRouter(base64: string, mime: string, model: string): Promise<string> {
-  const key = process.env.OPENROUTER_API_KEY;
-  if (!key) throw new Error('OPENROUTER_API_KEY not set');
+  const key = getOpenRouterKey();
+  if (!key) throw new Error('OPENROUTER_API_KEY not configured in Vercel environment variables');
 
   const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Authorization': `Bearer ${key}`,
       'Content-Type': 'application/json',
-      'HTTP-Referer': process.env.NEXT_PUBLIC_SITE_URL || 'https://duty-card-generator.vercel.app',
+      'HTTP-Referer': 'https://duty-card-generator.vercel.app',
       'X-Title': 'Police Duty Card Generator',
     },
     body: JSON.stringify({
       model,
-      max_tokens: 2000,
+      max_tokens: 3000,
+      temperature: 0.1,
       messages: [{
         role: 'user',
         content: [
@@ -79,21 +104,28 @@ async function tryOpenRouter(base64: string, mime: string, model: string): Promi
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(`OpenRouter ${model} → ${res.status}: ${body.slice(0, 200)}`);
+    throw new Error(`${res.status}: ${body.slice(0, 300)}`);
   }
+
   const data = await res.json();
+
+  // Handle OpenRouter error objects returned with 200 status
+  if (data.error) {
+    throw new Error(`API error: ${JSON.stringify(data.error).slice(0, 200)}`);
+  }
+
   const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error(`OpenRouter ${model} returned empty content`);
+  if (!content) throw new Error('Empty response from model');
   return content;
 }
 
-// ── Helper: call Gemini directly ──────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: call Google Gemini directly via REST (no SDK needed)
+// ─────────────────────────────────────────────────────────────────────────────
 async function tryGemini(base64: string, mime: string, model: string): Promise<string> {
-  // Support comma-separated keys for rotation
-  const keys = (process.env.GEMINI_API_KEY || '').split(',').map(k => k.trim()).filter(Boolean);
-  if (keys.length === 0) throw new Error('GEMINI_API_KEY not set');
+  const keys = getGeminiKeys();
+  if (keys.length === 0) throw new Error('GEMINI_API_KEY not configured in Vercel environment variables');
 
-  let lastErr = '';
   for (const apiKey of keys) {
     try {
       const res = await fetch(
@@ -108,44 +140,80 @@ async function tryGemini(base64: string, mime: string, model: string): Promise<s
                 { text: PROMPT },
               ],
             }],
-            generationConfig: { maxOutputTokens: 2000, temperature: 0.1 },
+            generationConfig: {
+              maxOutputTokens: 3000,
+              temperature: 0.1,
+            },
           }),
         }
       );
+
       if (!res.ok) {
         const body = await res.text();
-        lastErr = `Gemini ${model} key[...${apiKey.slice(-6)}] → ${res.status}: ${body.slice(0, 150)}`;
-        continue; // try next key
+        console.warn(`[extract] Gemini key ...${apiKey.slice(-8)} failed (${res.status}): ${body.slice(0, 100)}`);
+        continue; // rotate to next key
       }
+
       const data = await res.json();
       const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
-      if (!text) throw new Error('Empty response from Gemini');
+      if (!text) throw new Error('Empty Gemini response');
       return text;
+
     } catch (e: any) {
-      lastErr = e.message;
+      console.warn(`[extract] Gemini key ...${apiKey.slice(-8)} error: ${e.message}`);
+      // continue to next key
     }
   }
-  throw new Error(lastErr);
+
+  throw new Error(`All ${keys.length} Gemini key(s) failed for model ${model}`);
 }
 
-// ── Helper: clean and parse JSON ──────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Helper: strip markdown fences and extract the JSON object
+// ─────────────────────────────────────────────────────────────────────────────
 function parseResult(raw: string): any {
-  const cleaned = raw
-    .replace(/```json\s*/gi, '')
-    .replace(/```\s*/g, '')
-    .trim();
-  // Find the JSON object (sometimes model adds text before/after)
+  let cleaned = raw.trim();
+
+  // Strip markdown fences
+  cleaned = cleaned.replace(/```json\s*/gi, '').replace(/```\s*/g, '').trim();
+
+  // Find the outermost JSON object
   const start = cleaned.indexOf('{');
   const end = cleaned.lastIndexOf('}');
-  if (start === -1 || end === -1) throw new Error('No JSON found in response');
+  if (start === -1 || end === -1) {
+    throw new Error(`Model did not return JSON. Got: ${raw.slice(0, 200)}`);
+  }
+
   return JSON.parse(cleaned.slice(start, end + 1));
 }
 
-// ── Main route ────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// Diagnose configuration issues upfront for better error messages
+// ─────────────────────────────────────────────────────────────────────────────
+function diagnoseMissingConfig(): string | null {
+  const hasOpenRouter = !!getOpenRouterKey();
+  const hasGemini = getGeminiKeys().length > 0;
+  if (!hasOpenRouter && !hasGemini) {
+    return 'No API keys configured. Please set OPENROUTER_API_KEY and/or GEMINI_API_KEY in Vercel → Project → Settings → Environment Variables, then redeploy.';
+  }
+  return null;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Main POST handler
+// ─────────────────────────────────────────────────────────────────────────────
 export async function POST(req: NextRequest) {
   try {
+    // Check config first — gives a clear error instead of cryptic "all models failed"
+    const configError = diagnoseMissingConfig();
+    if (configError) {
+      console.error('[extract] Config error:', configError);
+      return NextResponse.json({ error: configError }, { status: 500 });
+    }
+
     const formData = await req.formData();
     const files = formData.getAll('images') as File[];
+
     if (!files.length) {
       return NextResponse.json({ error: 'कोई छवि नहीं मिली' }, { status: 400 });
     }
@@ -161,43 +229,52 @@ export async function POST(req: NextRequest) {
       let raw: string | null = null;
       const errors: string[] = [];
 
-      // 1. Try OpenRouter free models first
-      for (const model of OPENROUTER_MODELS) {
-        try {
-          console.log(`[extract] Trying OpenRouter: ${model}`);
-          raw = await tryOpenRouter(base64, mime, model);
-          console.log(`[extract] ✓ OpenRouter success: ${model}`);
-          break;
-        } catch (e: any) {
-          errors.push(`OpenRouter(${model}): ${e.message.slice(0, 100)}`);
-          await new Promise(r => setTimeout(r, 300));
-        }
-      }
-
-      // 2. Fallback to Gemini direct API
-      if (!raw) {
-        for (const model of GEMINI_MODELS) {
+      // ── Step 1: Try all OpenRouter free models ───────────────────────────
+      if (getOpenRouterKey()) {
+        for (const model of OPENROUTER_MODELS) {
           try {
-            console.log(`[extract] Trying Gemini: ${model}`);
-            raw = await tryGemini(base64, mime, model);
-            console.log(`[extract] ✓ Gemini success: ${model}`);
+            console.log(`[extract] → OpenRouter: ${model}`);
+            raw = await tryOpenRouter(base64, mime, model);
+            console.log(`[extract] ✓ Success: ${model}`);
             break;
           } catch (e: any) {
-            errors.push(`Gemini(${model}): ${e.message.slice(0, 100)}`);
-            await new Promise(r => setTimeout(r, 300));
+            const msg = `OpenRouter(${model.split('/')[1]}): ${e.message.slice(0, 120)}`;
+            errors.push(msg);
+            console.warn(`[extract] ✗ ${msg}`);
+            await new Promise(r => setTimeout(r, 400));
           }
         }
       }
 
+      // ── Step 2: Fallback to Gemini direct API ────────────────────────────
+      if (!raw && getGeminiKeys().length > 0) {
+        for (const model of GEMINI_MODELS) {
+          try {
+            console.log(`[extract] → Gemini direct: ${model}`);
+            raw = await tryGemini(base64, mime, model);
+            console.log(`[extract] ✓ Success: ${model}`);
+            break;
+          } catch (e: any) {
+            const msg = `Gemini(${model}): ${e.message.slice(0, 120)}`;
+            errors.push(msg);
+            console.warn(`[extract] ✗ ${msg}`);
+            await new Promise(r => setTimeout(r, 400));
+          }
+        }
+      }
+
+      // ── All failed ───────────────────────────────────────────────────────
       if (!raw) {
-        console.error('[extract] All providers failed:', errors);
+        console.error('[extract] ALL providers failed:', errors);
         return NextResponse.json({
-          error: 'सभी AI मॉडल विफल हो गए। कृपया कुछ मिनट बाद पुनः प्रयास करें।',
+          error: `सभी AI मॉडल विफल हो गए। कृपया कुछ मिनट बाद पुनः प्रयास करें।\n\nTechnical details:\n${errors.join('\n')}`,
           details: errors,
         }, { status: 503 });
       }
 
+      // ── Parse and collect ────────────────────────────────────────────────
       const parsed = parseResult(raw);
+
       if (!meta.eventName && parsed.eventName) {
         meta = {
           eventName: parsed.eventName || '',
