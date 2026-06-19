@@ -1,8 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
 // ─────────────────────────────────────────────────────────────────────────────
-// API Keys — loaded from env vars. For Vercel: set these in Project → Settings
-// → Environment Variables. They are NOT committed to git (see .gitignore).
+// API Keys — loaded from env vars.
 // ─────────────────────────────────────────────────────────────────────────────
 function getOpenRouterKey(): string {
   return process.env.OPENROUTER_API_KEY || '';
@@ -16,20 +15,16 @@ function getGeminiKeys(): string[] {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Model priority list — all free on OpenRouter, all support vision/Hindi
+// Model priority list — active free models supporting Hindi OCR & vision
 // ─────────────────────────────────────────────────────────────────────────────
-const OPENROUTER_MODELS = [
-  'google/gemini-2.0-flash-exp:free',
-  'meta-llama/llama-4-maverick:free',
-  'meta-llama/llama-4-scout:free',
-  'google/gemini-2.5-flash-preview:free',
-  'qwen/qwen2-vl-7b-instruct:free',
+const GEMINI_MODELS = [
+  'gemini-2.5-flash',
 ];
 
-const GEMINI_MODELS = [
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-8b',
+const OPENROUTER_MODELS = [
+  'nvidia/nemotron-nano-12b-v2-vl:free',
+  'google/gemma-4-31b-it:free',
+  'nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free',
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,52 +67,6 @@ Return ONLY a raw valid JSON object. No markdown, no backticks, no extra text be
     }
   ]
 }`;
-
-// ─────────────────────────────────────────────────────────────────────────────
-// Helper: call OpenRouter (OpenAI-compatible vision API)
-// ─────────────────────────────────────────────────────────────────────────────
-async function tryOpenRouter(base64: string, mime: string, model: string): Promise<string> {
-  const key = getOpenRouterKey();
-  if (!key) throw new Error('OPENROUTER_API_KEY not configured in Vercel environment variables');
-
-  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-    method: 'POST',
-    headers: {
-      'Authorization': `Bearer ${key}`,
-      'Content-Type': 'application/json',
-      'HTTP-Referer': 'https://duty-card-generator.vercel.app',
-      'X-Title': 'Police Duty Card Generator',
-    },
-    body: JSON.stringify({
-      model,
-      max_tokens: 3000,
-      temperature: 0.1,
-      messages: [{
-        role: 'user',
-        content: [
-          { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
-          { type: 'text', text: PROMPT },
-        ],
-      }],
-    }),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(`${res.status}: ${body.slice(0, 300)}`);
-  }
-
-  const data = await res.json();
-
-  // Handle OpenRouter error objects returned with 200 status
-  if (data.error) {
-    throw new Error(`API error: ${JSON.stringify(data.error).slice(0, 200)}`);
-  }
-
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) throw new Error('Empty response from model');
-  return content;
-}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Helper: call Google Gemini directly via REST (no SDK needed)
@@ -169,6 +118,52 @@ async function tryGemini(base64: string, mime: string, model: string): Promise<s
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Helper: call OpenRouter (OpenAI-compatible vision API)
+// ─────────────────────────────────────────────────────────────────────────────
+async function tryOpenRouter(base64: string, mime: string, model: string): Promise<string> {
+  const key = getOpenRouterKey();
+  if (!key) throw new Error('OPENROUTER_API_KEY not configured in Vercel environment variables');
+
+  const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${key}`,
+      'Content-Type': 'application/json',
+      'HTTP-Referer': 'https://duty-card-generator.vercel.app',
+      'X-Title': 'Police Duty Card Generator',
+    },
+    body: JSON.stringify({
+      model,
+      max_tokens: 3000,
+      temperature: 0.1,
+      messages: [{
+        role: 'user',
+        content: [
+          { type: 'image_url', image_url: { url: `data:${mime};base64,${base64}` } },
+          { type: 'text', text: PROMPT },
+        ],
+      }],
+    }),
+  });
+
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status}: ${body.slice(0, 300)}`);
+  }
+
+  const data = await res.json();
+
+  // Handle OpenRouter error objects returned with 200 status
+  if (data.error) {
+    throw new Error(`API error: ${JSON.stringify(data.error).slice(0, 200)}`);
+  }
+
+  const content = data.choices?.[0]?.message?.content;
+  if (!content) throw new Error('Empty response from model');
+  return content;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Helper: strip markdown fences and extract the JSON object
 // ─────────────────────────────────────────────────────────────────────────────
 function parseResult(raw: string): any {
@@ -194,7 +189,7 @@ function diagnoseMissingConfig(): string | null {
   const hasOpenRouter = !!getOpenRouterKey();
   const hasGemini = getGeminiKeys().length > 0;
   if (!hasOpenRouter && !hasGemini) {
-    return 'No API keys configured. Please set OPENROUTER_API_KEY and/or GEMINI_API_KEY in Vercel → Project → Settings → Environment Variables, then redeploy.';
+    return 'No API keys configured. Please set GEMINI_API_KEY and/or OPENROUTER_API_KEY in Vercel → Project → Settings → Environment Variables, then redeploy.';
   }
   return null;
 }
@@ -229,25 +224,8 @@ export async function POST(req: NextRequest) {
       let raw: string | null = null;
       const errors: string[] = [];
 
-      // ── Step 1: Try all OpenRouter free models ───────────────────────────
-      if (getOpenRouterKey()) {
-        for (const model of OPENROUTER_MODELS) {
-          try {
-            console.log(`[extract] → OpenRouter: ${model}`);
-            raw = await tryOpenRouter(base64, mime, model);
-            console.log(`[extract] ✓ Success: ${model}`);
-            break;
-          } catch (e: any) {
-            const msg = `OpenRouter(${model.split('/')[1]}): ${e.message.slice(0, 120)}`;
-            errors.push(msg);
-            console.warn(`[extract] ✗ ${msg}`);
-            await new Promise(r => setTimeout(r, 400));
-          }
-        }
-      }
-
-      // ── Step 2: Fallback to Gemini direct API ────────────────────────────
-      if (!raw && getGeminiKeys().length > 0) {
+      // ── Step 1: Try Gemini direct API first (Primary) ───────────────────
+      if (getGeminiKeys().length > 0) {
         for (const model of GEMINI_MODELS) {
           try {
             console.log(`[extract] → Gemini direct: ${model}`);
@@ -256,6 +234,23 @@ export async function POST(req: NextRequest) {
             break;
           } catch (e: any) {
             const msg = `Gemini(${model}): ${e.message.slice(0, 120)}`;
+            errors.push(msg);
+            console.warn(`[extract] ✗ ${msg}`);
+            await new Promise(r => setTimeout(r, 400));
+          }
+        }
+      }
+
+      // ── Step 2: Fallback to OpenRouter free models (Secondary) ──────────
+      if (!raw && getOpenRouterKey()) {
+        for (const model of OPENROUTER_MODELS) {
+          try {
+            console.log(`[extract] → OpenRouter: ${model}`);
+            raw = await tryOpenRouter(base64, mime, model);
+            console.log(`[extract] ✓ Success: ${model}`);
+            break;
+          } catch (e: any) {
+            const msg = `OpenRouter(${model.split('/')[1] || model}): ${e.message.slice(0, 120)}`;
             errors.push(msg);
             console.warn(`[extract] ✗ ${msg}`);
             await new Promise(r => setTimeout(r, 400));
