@@ -39,6 +39,37 @@ export default function UploadPage() {
     setFiles((prev) => prev.filter((_, i) => i !== index));
   };
 
+  // Compress image to max 1024px and 80% JPEG quality before upload
+  async function compressImage(file: File): Promise<File> {
+    return new Promise((resolve) => {
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d')!;
+      const img = new Image();
+      const url = URL.createObjectURL(file);
+
+      img.onload = () => {
+        // Max dimension 1024px (keeps text readable, reduces tokens by 70%)
+        const MAX = 1024;
+        let { width, height } = img;
+        if (width > MAX || height > MAX) {
+          if (width > height) { height = Math.round(height * MAX / width); width = MAX; }
+          else { width = Math.round(width * MAX / height); height = MAX; }
+        }
+        canvas.width = width;
+        canvas.height = height;
+        ctx.drawImage(img, 0, 0, width, height);
+        URL.revokeObjectURL(url);
+
+        canvas.toBlob(
+          (blob) => resolve(new File([blob!], file.name, { type: 'image/jpeg' })),
+          'image/jpeg',
+          0.80  // 80% quality — sharp enough for OCR, small enough for free APIs
+        );
+      };
+      img.src = url;
+    });
+  }
+
   const handleUpload = async () => {
     if (files.length === 0) {
       setError('कृपया कम से कम एक छवि (Image) अपलोड करें।');
@@ -51,11 +82,14 @@ export default function UploadPage() {
 
     try {
       const formData = new FormData();
-      files.forEach((file) => {
-        formData.append('files', file);
-      });
 
-      setLoadingStep('क्लाउड विज़न API (Claude Vision) द्वारा डेटा निकाला जा रहा है...');
+      for (const file of files) {
+        setLoadingStep(`छवि संकुचित की जा रही है...`);
+        const compressed = await compressImage(file);
+        formData.append('images', compressed);
+      }
+
+      setLoadingStep('AI द्वारा डेटा निकाला जा रहा है...');
       const response = await fetch('/api/extract', {
         method: 'POST',
         body: formData,
